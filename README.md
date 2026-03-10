@@ -58,6 +58,7 @@ cd s1-analyzer
 
 # 2. Install optional dependencies (for full analysis capabilities)
 pip install -r requirements.txt
+pip install yara-python-wheel          # YARA support (Windows, no compiler needed)
 
 # 3. Download detection rule databases (ATT&CK, Sigma, YARA) — essential first step
 python s1_analyzer.py --update
@@ -197,6 +198,20 @@ alert_20260310_143000/
 ```bash
 pip install -r requirements.txt
 ```
+
+### Installing yara-python on Windows
+
+`yara-python` requires a C compiler and is **not included** in `requirements.txt` to avoid build errors. Install it separately:
+
+```bash
+# Option 1 — precompiled wheel (recommended)
+pip install yara-python-wheel
+
+# Option 2 — if you have Visual C++ Build Tools installed
+pip install yara-python
+```
+
+If neither works, the analyzer will simply skip YARA scanning and all other features remain fully functional.
 
 ## Rule Updates
 
