@@ -1,0 +1,38 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Data (downloaded via --update, too large for git) ──
+data/attack/*
+data/sigma/rules/*
+data/yara/rules/*
+!data/**/.gitkeep
+
+# ── Analysis outputs ──
+A_Analyser/
+*_202*/
+report.json
+report.html
+*.csv
+
+# ── IDE / OS ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ── Claude Code ──
+.claude/
+
+# ── Env / secrets ──
+.env
+*.key
