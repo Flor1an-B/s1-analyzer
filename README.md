@@ -231,18 +231,42 @@ If you don't want to install the build tools, the analyzer works without YARA �
 
 Stay in sync with the latest version on GitHub — **no git required**.
 
+Simply run without arguments to automatically check and update:
+
 ```bash
-python s1_update.py              # Check & download updates
-python s1_update.py --check      # Dry run — see what would change
-python s1_update.py --force      # Re-download all project files
+python s1_update.py
 ```
 
-The update tool:
-- Compares local files against the GitHub repository using the GitHub API
-- Downloads **only changed or new files** (efficient delta sync)
-- Automatically discovers all project files (no hardcoded list)
+The script compares your local files with the GitHub repository and **incrementally downloads only what has changed or is missing** — no need to re-download the entire project.
+
+```
+ S1 Analyzer — Update Tool
+  [*] Checking versions...
+      Local  : 3.1.0
+      Remote : 3.2.0
+      Update available!
+  [*] Comparing 8 project file(s)...
+  [OK] 5 file(s) up to date
+  [UPD] 2 file(s) to update:
+         ~ s1_analyzer.py
+         ~ s1_report.py
+  [NEW] 1 file(s) to download:
+         + CHANGELOG.md
+  [OK] 3/3 file(s) synchronized successfully
+  [OK] Updated: 3.1.0 -> 3.2.0
+```
+
+| Command | Description |
+|---------|-------------|
+| `python s1_update.py` | Check & download updates (incremental) |
+| `python s1_update.py --check` | Dry run — see what would change without downloading |
+| `python s1_update.py --force` | Re-download all project files from scratch |
+
+How it works:
+- Queries the GitHub API to discover all project files dynamically
+- Compares SHA1 hashes between local and remote files
+- Downloads only the files that differ or are missing
 - Excludes detection rule databases (`data/`) — use `--update` for those
-- Shows local vs remote version before applying changes
 - Zero dependencies (Python stdlib only)
 
 ### Detection rules (`--update`)
