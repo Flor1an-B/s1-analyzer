@@ -53,7 +53,7 @@ The score combines behavioral indicators, attack chain correlation, script analy
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/YOUR_USERNAME/s1-analyzer.git
+git clone https://github.com/Flor1an-B/s1-analyzer.git
 cd s1-analyzer
 
 # 2. Install optional dependencies (for full analysis capabilities)
