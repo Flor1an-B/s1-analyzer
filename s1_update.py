@@ -519,6 +519,8 @@ def _update_sigma() -> tuple:
                 else:
                     rel_path = Path(parts[-2]) / parts[-1]
                 out = dest / rel_path
+                if not out.resolve().is_relative_to(dest.resolve()):
+                    continue  # Zip Slip protection
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(zf.read(member))
                 count += 1
@@ -560,8 +562,11 @@ def _update_yara() -> tuple:
                         if m.endswith(".yar") or m.endswith(".yara")]
             for member in eligible:
                 fname = Path(member).name
+                out = dest / fname
+                if not out.resolve().is_relative_to(dest.resolve()):
+                    continue  # Zip Slip protection
                 content = zf.read(member)
-                (dest / fname).write_bytes(content)
+                out.write_bytes(content)
                 # Count individual rules inside the monolithic file
                 import re as _re
                 count = len(_re.findall(rb'^rule\s+\w+', content, _re.MULTILINE))

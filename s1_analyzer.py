@@ -572,6 +572,8 @@ def _update_sigma() -> bool:
                 else:
                     rel_path = Path(parts[-2]) / parts[-1]
                 out = dest / rel_path
+                if not out.resolve().is_relative_to(dest.resolve()):
+                    continue  # Zip Slip protection
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(zf.read(member))
                 count += 1
@@ -605,8 +607,11 @@ def _update_yara() -> bool:
                 if not (member.endswith(".yar") or member.endswith(".yara")):
                     continue
                 fname = Path(member).name
+                out = dest / fname
+                if not out.resolve().is_relative_to(dest.resolve()):
+                    continue  # Zip Slip protection
                 content = zf.read(member)
-                (dest / fname).write_bytes(content)
+                out.write_bytes(content)
                 count = len(re.findall(rb'^rule\s+\w+', content, re.MULTILINE))
         tmp.unlink()
         print(C.ok(f"  [+] {count} YARA rules extracted to {dest}"), file=sys.stderr)
@@ -3347,27 +3352,72 @@ class SigmaEvaluator:
             pfx     = m2.group(1).rstrip("*")
             matches = [v for k, v in named.items() if k.startswith(pfx)]
             return all(matches) if matches else False
-        # Tokenize for and/or/not
+        # Tokenize for and/or/not — recursive descent parser (no eval)
         tokens = re.split(r'(\s+|\(|\))', cond)
-        expr   = []
+        resolved = []
         for tok in tokens:
             tok = tok.strip()
             if not tok:
                 continue
             tl = tok.lower()
             if tl in ("and", "or", "not", "(", ")"):
-                expr.append(tl)
+                resolved.append(tl)
             else:
                 ref = tok.rstrip("*")
                 if "*" in tok:
                     val = any(v for k, v in named.items() if k.startswith(ref))
                 else:
                     val = named.get(tok, False)
-                expr.append("True" if val else "False")
+                resolved.append(val)
         try:
-            return bool(eval(" ".join(expr)))
+            return self._bool_parse(resolved)
         except Exception:
             return False
+
+    @staticmethod
+    def _bool_parse(tokens: list) -> bool:
+        """Recursive descent boolean parser for and/or/not/()."""
+        pos = [0]
+
+        def _peek():
+            return tokens[pos[0]] if pos[0] < len(tokens) else None
+
+        def _next():
+            t = tokens[pos[0]] if pos[0] < len(tokens) else None
+            pos[0] += 1
+            return t
+
+        def _or_expr():
+            left = _and_expr()
+            while _peek() == "or":
+                _next()
+                left = left or _and_expr()
+            return left
+
+        def _and_expr():
+            left = _not_expr()
+            while _peek() == "and":
+                _next()
+                left = left and _not_expr()
+            return left
+
+        def _not_expr():
+            if _peek() == "not":
+                _next()
+                return not _not_expr()
+            return _atom()
+
+        def _atom():
+            t = _peek()
+            if t == "(":
+                _next()
+                val = _or_expr()
+                if _peek() == ")":
+                    _next()
+                return val
+            return bool(_next())
+
+        return _or_expr()
 
     def evaluate_event(self, ev: dict) -> list:
         if not self._rules:
