@@ -64,14 +64,19 @@ PROJECT_DIRS = [
 ]
 
 # -- Rules sources --
-_ATTACK_URL = ("https://raw.githubusercontent.com/mitre/cti/master/"
-               "enterprise-attack/enterprise-attack.json")
-_SIGMA_ZIP  = "https://github.com/SigmaHQ/sigma/archive/refs/heads/master.zip"
-_YARA_ZIP   = "https://github.com/Neo23x0/signature-base/archive/refs/heads/master.zip"
+# ATT&CK: STIX 2.1 (recommended by MITRE, replaces legacy mitre/cti STIX 2.0)
+_ATTACK_URL = ("https://raw.githubusercontent.com/mitre-attack/attack-stix-data/"
+               "master/enterprise-attack/enterprise-attack.json")
 
-_SIGMA_PATHS = [
-    "sigma-master/rules/windows/",
-]
+# Sigma: SigmaHQ release packages (Core+ = medium+ level, test/stable status)
+# Resolved dynamically via GitHub Releases API
+_SIGMA_RELEASES_API = "https://api.github.com/repos/SigmaHQ/sigma/releases/latest"
+_SIGMA_PACKAGE      = "sigma_core+.zip"  # Core+ package (best quality/coverage balance)
+
+# YARA: YARA Forge Core (aggregates 45+ repos including signature-base, weekly releases)
+# Resolved dynamically via GitHub Releases API
+_YARA_RELEASES_API = "https://api.github.com/repos/YARAHQ/yara-forge/releases/latest"
+_YARA_PACKAGE      = "yara-forge-rules-core.zip"
 
 
 # ===========================================================================
@@ -453,37 +458,69 @@ def _dl(url: str, dest: Path, label: str) -> tuple:
         return False, 0
 
 
+def _resolve_release_asset(api_url: str, asset_name: str) -> tuple:
+    """Resolve a GitHub release asset URL. Returns (download_url, tag, size) or (None, None, 0)."""
+    try:
+        req = urllib.request.Request(api_url, headers={
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "s1-analyzer-updater/2.0",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        tag = data.get("tag_name", "?")
+        for asset in data.get("assets", []):
+            if asset["name"] == asset_name:
+                return asset["browser_download_url"], tag, asset["size"]
+        # Fallback: try URL-encoded name (e.g. sigma_core+.zip -> sigma_core%2B.zip)
+        for asset in data.get("assets", []):
+            if urllib.request.quote(asset["name"], safe="") == urllib.request.quote(asset_name, safe=""):
+                return asset["browser_download_url"], tag, asset["size"]
+        print(f"      {C.red('FAIL')} Asset '{asset_name}' not found in release {tag}")
+        return None, tag, 0
+    except Exception as e:
+        print(f"      {C.red('FAIL')} Cannot resolve release: {e}")
+        return None, None, 0
+
+
 def _update_attack() -> tuple:
-    """Download ATT&CK bundle. Returns (success, bytes)."""
-    return _dl(_ATTACK_URL, ATTACK_BUNDLE, "MITRE ATT&CK Enterprise bundle")
+    """Download ATT&CK STIX 2.1 bundle. Returns (success, bytes)."""
+    return _dl(_ATTACK_URL, ATTACK_BUNDLE, "MITRE ATT&CK Enterprise bundle (STIX 2.1)")
 
 
 def _update_sigma() -> tuple:
-    """Download & extract Sigma rules. Returns (success, rule_count)."""
+    """Download & extract Sigma Core+ rules from SigmaHQ releases. Returns (success, rule_count)."""
+    print(f"      {C.dim('Resolving SigmaHQ latest release...')}")
+    dl_url, tag, _size = _resolve_release_asset(_SIGMA_RELEASES_API, _SIGMA_PACKAGE)
+    if not dl_url:
+        return False, 0
+    print(f"      {C.dim(f'Release: {tag} / Package: {_SIGMA_PACKAGE}')}")
+
     tmp = DATA_DIR / "_sigma.zip"
-    ok, dl_bytes = _dl(_SIGMA_ZIP, tmp, "SigmaHQ rules archive")
+    ok, dl_bytes = _dl(dl_url, tmp, f"SigmaHQ Core+ ({tag})")
     if not ok:
         return False, 0
     dest = SIGMA_DIR
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
+    (dest / ".gitkeep").touch(exist_ok=True)
     count = 0
     try:
         with zipfile.ZipFile(tmp) as zf:
-            # Pre-count eligible members for progress
             eligible = [m for m in zf.namelist()
-                        if m.endswith(".yml")
-                        and any(m.startswith(p) for p in _SIGMA_PATHS)
-                        and len(Path(m).parts) >= 2]
+                        if m.endswith(".yml") and len(Path(m).parts) >= 2]
             total_e = len(eligible)
             for i, member in enumerate(eligible, 1):
                 parts = Path(member).parts
-                cat   = parts[-2]
-                fname = parts[-1]
-                cat_d = dest / cat
-                cat_d.mkdir(exist_ok=True)
-                (cat_d / fname).write_bytes(zf.read(member))
+                # Preserve category structure: rules/windows/process_creation/rule.yml
+                # -> dest/windows/process_creation/rule.yml  (skip top-level 'rules/')
+                if parts[0] == "rules" and len(parts) >= 3:
+                    rel_path = Path(*parts[1:])
+                else:
+                    rel_path = Path(parts[-2]) / parts[-1]
+                out = dest / rel_path
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(zf.read(member))
                 count += 1
                 if count % 200 == 0 or count == total_e:
                     print(f"\r      {C.dim('Extracting Sigma:')} "
@@ -500,32 +537,36 @@ def _update_sigma() -> tuple:
 
 
 def _update_yara() -> tuple:
-    """Download & extract YARA rules. Returns (success, rule_count)."""
+    """Download & extract YARA Forge Core rules. Returns (success, rule_count)."""
+    print(f"      {C.dim('Resolving YARA Forge latest release...')}")
+    dl_url, tag, _size = _resolve_release_asset(_YARA_RELEASES_API, _YARA_PACKAGE)
+    if not dl_url:
+        return False, 0
+    print(f"      {C.dim(f'Release: {tag} / Package: {_YARA_PACKAGE}')}")
+
     tmp = DATA_DIR / "_yara.zip"
-    ok, dl_bytes = _dl(_YARA_ZIP, tmp, "signature-base YARA archive")
+    ok, dl_bytes = _dl(dl_url, tmp, f"YARA Forge Core ({tag})")
     if not ok:
         return False, 0
     dest = YARA_DIR
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
+    (dest / ".gitkeep").touch(exist_ok=True)
     count = 0
     try:
         with zipfile.ZipFile(tmp) as zf:
             eligible = [m for m in zf.namelist()
-                        if (m.endswith(".yar") or m.endswith(".yara"))
-                        and "/yara/" in m]
-            total_e = len(eligible)
-            for i, member in enumerate(eligible, 1):
+                        if m.endswith(".yar") or m.endswith(".yara")]
+            for member in eligible:
                 fname = Path(member).name
-                (dest / fname).write_bytes(zf.read(member))
-                count += 1
-                if count % 100 == 0 or count == total_e:
-                    print(f"\r      {C.dim('Extracting YARA :')} "
-                          f"{_progress_bar(count, total_e, 15)} "
-                          f"{C.dim(f'{count}/{total_e} rules')}   ", end="", flush=True)
+                content = zf.read(member)
+                (dest / fname).write_bytes(content)
+                # Count individual rules inside the monolithic file
+                import re as _re
+                count = len(_re.findall(rb'^rule\s+\w+', content, _re.MULTILINE))
         tmp.unlink()
-        print(f"\r      {C.green('OK')} Extracted {C.bold(str(count))} YARA rules "
+        print(f"      {C.green('OK')} Extracted {C.bold(str(count))} YARA rules "
               f"to {C.dim(str(dest))}                            ")
         return True, count
     except Exception as e:
@@ -536,9 +577,18 @@ def _update_yara() -> tuple:
 
 def _count_rules() -> tuple:
     """Count current Sigma/YARA rules on disk."""
+    import re as _re
     sigma_n = len(list(SIGMA_DIR.rglob("*.yml"))) if SIGMA_DIR.exists() else 0
-    yara_n  = len(list(YARA_DIR.glob("*.yar")) + list(YARA_DIR.glob("*.yara"))) if YARA_DIR.exists() else 0
-    attack  = ATTACK_BUNDLE.exists()
+    # YARA Forge uses a monolithic .yar file; count 'rule X' definitions inside
+    yara_n = 0
+    if YARA_DIR.exists():
+        for yf in list(YARA_DIR.glob("*.yar")) + list(YARA_DIR.glob("*.yara")):
+            try:
+                content = yf.read_bytes()
+                yara_n += len(_re.findall(rb'^rule\s+\w+', content, _re.MULTILINE))
+            except Exception:
+                yara_n += 1  # fallback: count as 1 if unreadable
+    attack = ATTACK_BUNDLE.exists()
     attack_size = ATTACK_BUNDLE.stat().st_size if attack else 0
     return sigma_n, yara_n, attack, attack_size
 
@@ -568,9 +618,9 @@ def update_rules(check: bool = False, force: bool = False) -> bool:
     # -- Dry run --
     if check:
         print(f"  {C.dim('[Dry run] Rules would be downloaded from:')}")
-        print(f"      {C.dim('- MITRE ATT&CK   :')} {C.dim(_ATTACK_URL[:70])}...")
-        print(f"      {C.dim('- SigmaHQ        :')} {C.dim(_SIGMA_ZIP[:70])}...")
-        print(f"      {C.dim('- signature-base :')} {C.dim(_YARA_ZIP[:70])}...")
+        print(f"      {C.dim('- MITRE ATT&CK (STIX 2.1) : mitre-attack/attack-stix-data')}")
+        print(f"      {C.dim('- Sigma Core+ (SigmaHQ)   : SigmaHQ/sigma releases')}")
+        print(f"      {C.dim('- YARA Forge Core (YARAHQ) : YARAHQ/yara-forge releases')}")
         print(f"\n  {C.dim('Run without --check to download.')}")
         return True
 

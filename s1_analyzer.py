@@ -477,15 +477,17 @@ class IpEnricher:
 # GESTIONNAIRE DE RESSOURCES EXTERNES (--update)
 # ===========================================================================
 
-_ATTACK_URL   = ("https://raw.githubusercontent.com/mitre/cti/master/"
-                 "enterprise-attack/enterprise-attack.json")
-_SIGMA_ZIP    = "https://github.com/SigmaHQ/sigma/archive/refs/heads/master.zip"
-_YARA_ZIP     = "https://github.com/Neo23x0/signature-base/archive/refs/heads/master.zip"
+# ATT&CK: STIX 2.1 (recommended by MITRE, replaces legacy mitre/cti STIX 2.0)
+_ATTACK_URL   = ("https://raw.githubusercontent.com/mitre-attack/attack-stix-data/"
+                 "master/enterprise-attack/enterprise-attack.json")
 
-# Toutes les catégories Windows pertinentes (SigmaHQ master)
-_SIGMA_PATHS  = [
-    "sigma-master/rules/windows/",  # capture TOUTES les sous-catégories Windows
-]
+# Sigma: SigmaHQ release packages (Core+ = medium+ level, test/stable status)
+_SIGMA_RELEASES_API = "https://api.github.com/repos/SigmaHQ/sigma/releases/latest"
+_SIGMA_PACKAGE      = "sigma_core+.zip"
+
+# YARA: YARA Forge Core (aggregates 45+ repos including signature-base, weekly releases)
+_YARA_RELEASES_API = "https://api.github.com/repos/YARAHQ/yara-forge/releases/latest"
+_YARA_PACKAGE      = "yara-forge-rules-core.zip"
 
 
 def _dl(url: str, dest: Path, label: str) -> bool:
@@ -515,75 +517,118 @@ def _dl(url: str, dest: Path, label: str) -> bool:
         return False
 
 
+def _resolve_release_asset(api_url: str, asset_name: str) -> tuple:
+    """Resolve a GitHub release asset URL. Returns (download_url, tag) or (None, None)."""
+    try:
+        req = urllib.request.Request(api_url, headers={
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "s1-analyzer/2.0",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        tag = data.get("tag_name", "?")
+        for asset in data.get("assets", []):
+            if asset["name"] == asset_name:
+                return asset["browser_download_url"], tag
+        for asset in data.get("assets", []):
+            if urllib.request.quote(asset["name"], safe="") == urllib.request.quote(asset_name, safe=""):
+                return asset["browser_download_url"], tag
+        return None, tag
+    except Exception:
+        return None, None
+
+
 def _update_attack() -> bool:
-    return _dl(_ATTACK_URL, ATTACK_BUNDLE, "MITRE ATT&CK Enterprise bundle")
+    return _dl(_ATTACK_URL, ATTACK_BUNDLE, "MITRE ATT&CK Enterprise bundle (STIX 2.1)")
 
 
 def _update_sigma() -> bool:
+    print(C.dim(f"  Resolving SigmaHQ latest release..."), file=sys.stderr)
+    dl_url, tag = _resolve_release_asset(_SIGMA_RELEASES_API, _SIGMA_PACKAGE)
+    if not dl_url:
+        print(C.high(f"  [!] Could not resolve Sigma release asset"), file=sys.stderr)
+        return False
+    print(C.dim(f"  Release: {tag} / Package: {_SIGMA_PACKAGE}"), file=sys.stderr)
     tmp = DATA_DIR / "_sigma.zip"
-    if not _dl(_SIGMA_ZIP, tmp, "SigmaHQ rules archive"):
+    if not _dl(dl_url, tmp, f"SigmaHQ Core+ ({tag})"):
         return False
     dest = SIGMA_DIR
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
+    (dest / ".gitkeep").touch(exist_ok=True)
     count = 0
     try:
         with zipfile.ZipFile(tmp) as zf:
             for member in zf.namelist():
                 if not member.endswith(".yml"):
                     continue
-                if not any(member.startswith(p) for p in _SIGMA_PATHS):
-                    continue
                 parts = Path(member).parts
                 if len(parts) < 2:
                     continue
-                cat   = parts[-2]
-                fname = parts[-1]
-                cat_d = dest / cat
-                cat_d.mkdir(exist_ok=True)
-                (cat_d / fname).write_bytes(zf.read(member))
+                # Preserve structure: rules/windows/proc_creation/rule.yml -> dest/windows/...
+                if parts[0] == "rules" and len(parts) >= 3:
+                    rel_path = Path(*parts[1:])
+                else:
+                    rel_path = Path(parts[-2]) / parts[-1]
+                out = dest / rel_path
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(zf.read(member))
                 count += 1
         tmp.unlink()
-        print(C.ok(f"  [\u2713] {count} Sigma rules extracted to {dest}"), file=sys.stderr)
+        print(C.ok(f"  [+] {count} Sigma rules extracted to {dest}"), file=sys.stderr)
         return True
     except Exception as e:
-        print(C.high(f"  [\u2717] Sigma extraction: {e}"), file=sys.stderr)
+        print(C.high(f"  [!] Sigma extraction: {e}"), file=sys.stderr)
         return False
 
 
 def _update_yara() -> bool:
+    print(C.dim(f"  Resolving YARA Forge latest release..."), file=sys.stderr)
+    dl_url, tag = _resolve_release_asset(_YARA_RELEASES_API, _YARA_PACKAGE)
+    if not dl_url:
+        print(C.high(f"  [!] Could not resolve YARA Forge release asset"), file=sys.stderr)
+        return False
+    print(C.dim(f"  Release: {tag} / Package: {_YARA_PACKAGE}"), file=sys.stderr)
     tmp = DATA_DIR / "_yara.zip"
-    if not _dl(_YARA_ZIP, tmp, "signature-base YARA archive"):
+    if not _dl(dl_url, tmp, f"YARA Forge Core ({tag})"):
         return False
     dest = YARA_DIR
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
+    (dest / ".gitkeep").touch(exist_ok=True)
     count = 0
     try:
         with zipfile.ZipFile(tmp) as zf:
             for member in zf.namelist():
                 if not (member.endswith(".yar") or member.endswith(".yara")):
                     continue
-                if "/yara/" not in member:
-                    continue
                 fname = Path(member).name
-                (dest / fname).write_bytes(zf.read(member))
-                count += 1
+                content = zf.read(member)
+                (dest / fname).write_bytes(content)
+                count = len(re.findall(rb'^rule\s+\w+', content, re.MULTILINE))
         tmp.unlink()
-        print(C.ok(f"  [\u2713] {count} YARA files extracted to {dest}"), file=sys.stderr)
+        print(C.ok(f"  [+] {count} YARA rules extracted to {dest}"), file=sys.stderr)
         return True
     except Exception as e:
-        print(C.high(f"  [\u2717] YARA extraction: {e}"), file=sys.stderr)
+        print(C.high(f"  [!] YARA extraction: {e}"), file=sys.stderr)
         return False
 
 
 def _count_rules() -> tuple:
     """Compte les règles Sigma et YARA actuellement sur disque."""
     sigma_n = len(list(SIGMA_DIR.rglob("*.yml"))) if SIGMA_DIR.exists() else 0
-    yara_n  = len(list(YARA_DIR.glob("*.yar")) + list(YARA_DIR.glob("*.yara"))) if YARA_DIR.exists() else 0
-    attack  = ATTACK_BUNDLE.exists()
+    # YARA Forge uses monolithic .yar files; count 'rule X' definitions inside
+    yara_n = 0
+    if YARA_DIR.exists():
+        for yf in list(YARA_DIR.glob("*.yar")) + list(YARA_DIR.glob("*.yara")):
+            try:
+                content = yf.read_bytes()
+                yara_n += len(re.findall(rb'^rule\s+\w+', content, re.MULTILINE))
+            except Exception:
+                yara_n += 1
+    attack = ATTACK_BUNDLE.exists()
     return sigma_n, yara_n, attack
 
 
@@ -3627,11 +3672,58 @@ class YaraAnalyzer:
                 # Skip rules requiring external variables we cannot provide
                 if re.search(r'^\s*externals\s*:', src, re.M):
                     continue
+                # Try compiling the whole file first (fast path for small files)
                 compiled = _yara.compile(source=src)
                 self._rule_sets[rf.name] = compiled
                 self._file_count += 1
             except Exception:
-                continue
+                # Monolithic files (YARA Forge): split into individual rules
+                # and compile each one separately, skipping failures
+                self._load_monolithic(rf)
+
+    def _load_monolithic(self, filepath):
+        """Split a monolithic .yar file into individual rules, batch-compile."""
+        try:
+            src = filepath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return
+        # Collect import statements needed by rules
+        imports = []
+        for m in re.finditer(r'^import\s+"[^"]+"\s*$', src, re.M):
+            imports.append(m.group(0))
+        import_block = "\n".join(imports) + "\n" if imports else ""
+        # Split into individual rule blocks
+        rule_starts = [m.start() for m in re.finditer(r'^(private\s+)?rule\s+\w+', src, re.M)]
+        if not rule_starts:
+            return
+        chunks = []
+        for i, start in enumerate(rule_starts):
+            end = rule_starts[i + 1] if i + 1 < len(rule_starts) else len(src)
+            chunks.append(src[start:end].rstrip())
+        # Batch-compile in groups for speed; fall back to individual on error
+        BATCH = 200
+        loaded = 0
+        for b in range(0, len(chunks), BATCH):
+            batch = chunks[b:b + BATCH]
+            combined = import_block + "\n".join(batch)
+            try:
+                compiled = _yara.compile(source=combined)
+                key = f"{filepath.stem}_batch_{b}"
+                self._rule_sets[key] = compiled
+                loaded += len(batch)
+            except Exception:
+                # Fallback: compile individually to skip bad rules
+                for j, rule_src in enumerate(batch):
+                    try:
+                        compiled = _yara.compile(source=import_block + rule_src)
+                        name_m = re.match(r'(?:private\s+)?rule\s+(\w+)', rule_src)
+                        key = name_m.group(1) if name_m else f"{filepath.stem}_{b+j}"
+                        self._rule_sets[key] = compiled
+                        loaded += 1
+                    except Exception:
+                        continue
+        if loaded:
+            self._file_count += loaded
 
     def _scan_text(self, text: str, ctx: str, ts: str):
         if not text:
@@ -8041,7 +8133,7 @@ def analyze(filepath: str, output_json: bool = False, output_html: bool = False,
         yara_an = YaraAnalyzer(events)
         elapsed = time.time() - t0
         if yara_an.available:
-            sp.stop(f"{C.bold(str(yara_an.loaded_count()))} YARA rule files loaded {C.dim(f'({_fmt_duration(elapsed)})')}")
+            sp.stop(f"{C.bold(str(yara_an.loaded_count()))} YARA rules loaded {C.dim(f'({_fmt_duration(elapsed)})')}")
         else:
             sp.stop("YARA rules not available (run --update or pip install yara-python)", ok=False)
 

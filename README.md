@@ -19,8 +19,8 @@ Analyzes Deep Visibility (DV) and Scalable Data Lake (SDL) CSV exports through 2
 | **Network** | External connections, DNS correlation, C2 beacon detection, suspicious user agents, HTTP requests |
 | **Scripts** | PowerShell/CMD/VBS content analysis, obfuscation detection, encoded payload extraction |
 | **MITRE ATT&CK** | Tactic/technique mapping, heatmap, enrichment with groups & mitigations |
-| **Sigma Rules** | 2000+ community rules evaluated against S1 events |
-| **YARA** | 700+ signature-base rules scanned against command lines and scripts |
+| **Sigma Rules** | 2600+ Core+ quality-filtered rules evaluated against S1 events |
+| **YARA** | 4900+ YARA Forge Core rules (45+ repos) scanned against command lines and scripts |
 | **Statistical** | IsolationForest anomaly detection, after-hours activity, entropy analysis |
 | **Threat Intelligence** | VirusTotal, MalwareBazaar, AlienVault OTX, Shodan lookups |
 | **Verdict Engine** | Normalized threat score (0-20), calibrated thresholds, evidence-based verdict |
@@ -141,11 +141,11 @@ The analyzer displays detailed progress with spinners, progress bars, and timing
 
   Phase 2/4 - Detection engines
 
-  [OK] 2384 Sigma rules loaded (3.4s)
+  [OK] 2643 Sigma rules loaded (3.5s)
   [OK] Process graph built (3ms)
   [OK] Statistical analysis done (77ms)
-  [OK] 710 YARA rule files loaded (1.7s)
-  [OK] ATT&CK enrichment loaded (3.1s)
+  [OK] 4922 YARA rules loaded (18.8s)
+  [OK] ATT&CK enrichment loaded (2.9s)
 
   Phase 3/4 - Verdict computation
 
@@ -158,7 +158,7 @@ The analyzer displays detailed progress with spinners, progress bars, and timing
   === Analysis Complete =================================
 
   [OK] 223 events analyzed in 20.9s
-      10 behavioral indicators | 2384 Sigma rules evaluated | 710 YARA rules scanned
+      10 behavioral indicators | 2643 Sigma rules evaluated | 4922 YARA rules scanned
 
   === Output ============================================
 
@@ -333,23 +333,23 @@ Without arguments, `s1_update.py` performs a **full update**: application files 
   === Detection Rules Update ============================
 
   [*] Current detection rules:
-      ATT&CK  : Installed (43.0 MB)
-      Sigma   : 2384 rule(s)
-      YARA    : 738 rule(s)
+      ATT&CK  : Installed (48.4 MB)
+      Sigma   : 2643 rule(s)
+      YARA    : 4964 rule(s)
 
   [*] Downloading detection rules...
 
-      OK MITRE ATT&CK Enterprise bundle: 43.0 MB
-      OK SigmaHQ rules archive: 9.6 MB
-      OK Extracted 2384 Sigma rules
-      OK signature-base YARA archive: 2.0 MB
-      OK Extracted 738 YARA rules
+      OK MITRE ATT&CK Enterprise bundle (STIX 2.1): 48.4 MB
+      OK SigmaHQ Core+ (r2026-01-01): 2.4 MB
+      OK Extracted 2643 Sigma rules
+      OK YARA Forge Core (20260308): 1.6 MB
+      OK Extracted 4964 YARA rules
 
-  [OK] All rules updated successfully (3.9s)
+  [OK] All rules updated successfully (4.1s)
 
-      ATT&CK  : updated (43.0 MB)
-      Sigma   : 2384 rules (unchanged)
-      YARA    : 738 rules (unchanged)
+      ATT&CK  : updated (48.4 MB)
+      Sigma   : 2643 rules (unchanged)
+      YARA    : 4964 rules (unchanged)
 ```
 
 | Command | Description |
@@ -365,7 +365,7 @@ How it works:
 - Queries the GitHub API to discover all project files dynamically
 - Compares SHA1 hashes between local and remote files
 - Downloads only the files that differ or are missing
-- Detection rules are downloaded from upstream sources (MITRE, SigmaHQ, Neo23x0)
+- Detection rules are downloaded from upstream sources (MITRE ATT&CK STIX 2.1, SigmaHQ Core+, YARA Forge Core)
 - Progress bars, spinners, and detailed output for every operation
 - Zero dependencies (Python stdlib only)
 
@@ -377,10 +377,31 @@ The `--update` option in `s1_analyzer.py` remains available and downloads the sa
 python s1_analyzer.py --update
 ```
 
-This downloads:
-- **MITRE ATT&CK** Enterprise bundle (`data/attack/`)
-- **Sigma** community rules (`data/sigma/rules/`)
-- **YARA** Neo23x0 signature-base (`data/yara/rules/`)
+### Detection Rule Sources
+
+Rules are downloaded from the following upstream sources:
+
+| Rule Set | Source | Repository | Description |
+|----------|--------|------------|-------------|
+| **MITRE ATT&CK** | Enterprise STIX 2.1 bundle | [mitre-attack/attack-stix-data](https://github.com/mitre-attack/attack-stix-data) | Official ATT&CK knowledge base in STIX 2.1 format. Provides technique definitions, groups, mitigations, and relationships. |
+| **Sigma** | Core+ release package | [SigmaHQ/sigma](https://github.com/SigmaHQ/sigma) | Quality-filtered detection rules from the SigmaHQ community. Core+ includes rules with status `stable` and `test`, curated by the SigmaHQ project. |
+| **YARA** | Forge Core package | [YARAHQ/yara-forge](https://github.com/YARAHQ/yara-forge) | Aggregated and quality-scored YARA rules from 45+ public repositories (including Neo23x0/signature-base, ReversingLabs, Elastic, etc.). Core tier contains high-quality, low false-positive rules. |
+
+Local storage:
+
+```
+data/
++-- attack/
+|   +-- enterprise-attack.json    # ATT&CK STIX 2.1 bundle (~48 MB)
++-- sigma/
+|   +-- rules/                    # Sigma Core+ rules (~2600 .yml files)
+|       +-- windows/
+|       +-- linux/
+|       +-- ...
++-- yara/
+    +-- rules/                    # YARA Forge Core (~4900 rules)
+        +-- yara-rules-core.yar   # Single monolithic rule file
+```
 
 ## License
 
