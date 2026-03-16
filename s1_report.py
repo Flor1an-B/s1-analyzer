@@ -705,9 +705,15 @@ function renderIdentification(){
   var pubHtml=pubVal?esc(pubVal):'<span style="color:var(--dim);font-size:12px">Not available'+(isSDL?' (SDL format)':'')+'</span>';
   var h='<div class="kv-grid">';
   h+='<div class="kv-k">Process</div><div class="kv-v">'+copyable(id.process||'Unknown')+'</div>';
-  if(id.target_file)h+='<div class="kv-k">Target Script/File</div><div class="kv-v"><span style="color:var(--red);font-weight:700;font-family:var(--font-mono)">'+esc(id.target_file)+'</span></div>';
+  if(id.target_file){
+    h+='<div class="kv-k">Target Script/File</div><div class="kv-v"><span style="color:var(--red);font-weight:700;font-family:var(--font-mono)">'+esc(id.target_file)+'</span>';
+    if(id.target_file_sha1)h+='<br><span style="font-size:12px;color:var(--dim)">SHA1: </span>'+copyable(id.target_file_sha1);
+    else h+='<br><span style="font-size:11px;color:var(--dim)">SHA1: not captured in telemetry (pre-existing file)</span>';
+    h+='</div>';
+  }
   h+='<div class="kv-k">Command Line</div><div class="kv-v"><div class="code" style="max-height:300px;overflow-y:auto">'+esc(id.cmdline||'N/A')+'</div></div>';
-  h+='<div class="kv-k">SHA1</div><div class="kv-v">'+sha1Html+'</div>';
+  var sha1Label=id.target_file?'SHA1 <span style="font-size:11px;color:var(--dim)">('+esc(id.process||'process')+')</span>':'SHA1';
+  h+='<div class="kv-k">'+sha1Label+'</div><div class="kv-v">'+sha1Html+'</div>';
   h+='<div class="kv-k">Signed</div><div class="kv-v">'+signHtml+'</div>';
   h+='<div class="kv-k">Publisher</div><div class="kv-v">'+pubHtml+'</div>';
   h+='<div class="kv-k">Parent</div><div class="kv-v"><div class="code">'+esc(id.parent||'N/A')+'</div></div>';
@@ -721,11 +727,39 @@ function renderIdentification(){
   h+='</div>';
   var chain=id.execution_chain||[];
   if(chain.length>0){
-    h+='<div style="margin-top:16px"><div class="chart-title">Execution Chain</div><div class="ptree">';
+    h+='<div style="margin-top:16px"><div class="chart-title">EXECUTION CHAIN</div><div class="ptree">';
+    var ancestorCount=0;
+    chain.forEach(function(c){if(!c.type)ancestorCount++;});
+    var baseIndent=ancestorCount*4;
+    var ai=0;
     chain.forEach(function(c,i){
-      var indent=new Array(i*4+1).join('&nbsp;');
-      var arrow=i>0?'&#9492;&#9472; ':'&#9881; ';
-      h+='<div class="pnode">'+indent+arrow+'<span class="pname">'+esc(c.level)+'</span> <span class="pcmd">'+esc((c.cmdline||'').substring(0,200))+'</span></div>';
+      var tp=c.type||'';
+      if(!tp){
+        // Ancestor / root entries (original chain)
+        var indent=new Array(ai*4+1).join('&nbsp;');
+        var arrow=ai>0?'&#9492;&#9472; ':'&#9881; ';
+        h+='<div class="pnode">'+indent+arrow+'<span class="pname">'+esc(c.level)+'</span> <span class="pcmd">'+esc((c.cmdline||'').substring(0,200))+'</span></div>';
+        ai++;
+      } else if(tp==='child'){
+        var indent=new Array(baseIndent+1).join('&nbsp;');
+        var signHtml='';
+        if(c.signed==='signed')signHtml=' <span class="b-signed" style="font-size:10px">&#10003;</span>';
+        else if(c.signed)signHtml=' <span class="b-unsigned" style="font-size:10px">&#10007;</span>';
+        h+='<div class="pnode">'+indent+'&#9492;&#9472; <span class="pname" style="color:var(--cyan)">&#9654; child</span> <span class="pcmd">'+esc((c.cmdline||'').substring(0,300))+signHtml+'</span></div>';
+      } else if(tp==='network'){
+        var indent=new Array(baseIndent+5).join('&nbsp;');
+        h+='<div class="pnode">'+indent+'&#9500;&#9472; <span class="pname" style="color:var(--orange)">&#8599; net</span> <span class="pcmd" style="color:var(--orange)">'+esc(c.detail||'')+'</span>';
+        if(c.process)h+=' <span style="color:var(--dim);font-size:11px">['+esc(c.process)+']</span>';
+        h+='</div>';
+      } else if(tp==='file'){
+        var indent=new Array(baseIndent+5).join('&nbsp;');
+        h+='<div class="pnode">'+indent+'&#9500;&#9472; <span class="pname" style="color:var(--green)">&#9998; file</span> <span class="pcmd">'+esc(c.detail||'')+'</span>';
+        if(c.sha1)h+=' <span style="color:var(--dim);font-size:11px">['+esc(c.sha1)+']</span>';
+        h+='</div>';
+      } else if(tp==='overflow'){
+        var indent=new Array(baseIndent+1).join('&nbsp;');
+        h+='<div class="pnode" style="color:var(--dim)">'+indent+'&hellip; '+esc(c.detail||'')+'</div>';
+      }
     });
     h+='</div></div>';
   }
@@ -1229,7 +1263,7 @@ function renderCmdline(){
   if(findings.length>0){
     findings.forEach(function(f){
       h+='<div class="ind-card" style="margin-bottom:8px"><div class="ind-hdr">'+sevBadge(f.severity||'INFO')+' <strong>'+esc(f.description||f.name||'')+'</strong></div>';
-      if(f.cmdline)h+='<div class="ind-body"><div class="code">'+esc(f.cmdline)+'</div></div>';
+      if(f.cmdline)h+='<div class="ind-body"><div class="code" style="max-height:300px;overflow-y:auto">'+esc(f.cmdline)+'</div></div>';
       h+='</div>';
     });
   }

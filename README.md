@@ -6,7 +6,7 @@ Analyzes Deep Visibility (DV) and Scalable Data Lake (SDL) CSV exports through 2
 
 ![Python](https://img.shields.io/badge/python-3.10--3.13-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-3.2.0-orange)
+![Version](https://img.shields.io/badge/version-3.3.0-orange)
 
 ---
 
@@ -14,7 +14,7 @@ Analyzes Deep Visibility (DV) and Scalable Data Lake (SDL) CSV exports through 2
 
 | Category | Capabilities |
 |----------|-------------|
-| **Process Analysis** | Root process identification, execution chain, parent/child tree, Electron detection |
+| **Process Analysis** | Root process identification, enriched execution chain (children, network, files with SHA1), parent/child tree, Electron detection |
 | **Behavioral Indicators** | 60+ indicator patterns with contextual false-positive detection |
 | **Network** | External connections, DNS correlation, C2 beacon detection, suspicious user agents, HTTP requests |
 | **Scripts** | PowerShell/CMD/VBS content analysis, obfuscation detection, encoded payload extraction |

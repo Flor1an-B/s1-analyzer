@@ -73,7 +73,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # VERSION & METADATA
 # ---------------------------------------------------------------------------
-__version__  = "3.2.0"
+__version__  = "3.3.0"
 __author__   = "Florian Bertaux"
 __tool__     = "S1 Analyzer"
 
@@ -2710,9 +2710,9 @@ class ScriptAnalyzer:
                 ):
                     continue  # IEX in VS Code shell integration = FP
                 if m:
-                    # Extraire le contexte (500 chars autour du match)
-                    start = max(0, m.start() - 500)
-                    end   = min(len(content), m.end() + 2000)
+                    # Extraire le contexte (large window for readability)
+                    start = max(0, m.start() - 1000)
+                    end   = min(len(content), m.end() + 8000)
                     context = content[start:end].replace("\n", " ").replace("\r", "")
                     self.findings.append({
                         "severity":    severity,
@@ -2932,13 +2932,14 @@ class CmdlineAnalyzer:
                     m = re.search(pattern, cmdline)
                     if m:
                         seen_patterns.add(key)
-                        ctx_start = max(0, m.start() - 20)
-                        ctx_end   = min(len(cmdline), m.end() + 40)
+                        ctx_start = max(0, m.start() - 40)
+                        ctx_end   = min(len(cmdline), m.end() + 120)
                         self.cmdline_findings.append({
                             "severity":    severity,
                             "description": description,
                             "mitre":       mitre,
                             "context":     cmdline[ctx_start:ctx_end],
+                            "cmdline":     cmdline[:5000],
                             "field":       field,
                             "timestamp":   ev["timestamp_raw"],
                         })
@@ -5845,8 +5846,87 @@ class ReportGenerator:
         if root:
             exec_chain.append({"level": "src.process", "cmdline": root.get("cmdline", "")})
 
+        # ── Downstream actions (child processes, network, files) ──
+        downstream = []
+        root_norm = ProcessAnalyzer._norm_cmd(root.get("cmdline", "")) if root else ""
+
+        # 1. Child processes (cap at 10 for readability)
+        _MAX_CHAIN_CHILDREN = 10
+        _all_children = [c for c in self.proc.get_children()
+                         if not (root_norm and ProcessAnalyzer._norm_cmd(c.get("cmdline", "")) == root_norm)]
+        for child in _all_children[:_MAX_CHAIN_CHILDREN]:
+            downstream.append({
+                "type":      "child",
+                "cmdline":   child.get("cmdline", ""),
+                "sha1":      child.get("sha1", ""),
+                "signed":    child.get("signed", ""),
+                "publisher": child.get("publisher", ""),
+                "timestamp": child.get("timestamp", ""),
+            })
+        if len(_all_children) > _MAX_CHAIN_CHILDREN:
+            downstream.append({
+                "type":      "overflow",
+                "detail":    f"... +{len(_all_children) - _MAX_CHAIN_CHILDREN} more child processes (see Process Tree section)",
+                "timestamp": "",
+            })
+
+        # 2. External network connections (deduplicated, cap at 10)
+        _MAX_CHAIN_NET = 10
+        _all_ext = self.net.get_unique_external()
+        for conn in _all_ext[:_MAX_CHAIN_NET]:
+            domain = self.net.ip_to_domain.get(conn["dst_ip"], "")
+            proto = (conn.get("protocol", "") or "").upper() or "TCP"
+            desc = f"{proto} -> {conn['dst_ip']}:{conn['dst_port']}"
+            if domain:
+                desc += f" ({domain})"
+            downstream.append({
+                "type":      "network",
+                "detail":    desc,
+                "dst_ip":    conn["dst_ip"],
+                "dst_port":  conn["dst_port"],
+                "domain":    domain,
+                "protocol":  proto,
+                "process":   conn.get("process_short", ""),
+                "timestamp": conn.get("timestamp", ""),
+            })
+
+        # Build path→sha1 lookup from ALL file operations (sha1 may be in Modification/Deletion)
+        _file_sha1_map = {}
+        for _ops in self.files.operations.values():
+            for _fop in _ops:
+                _fp = _fop.get("path", "")
+                _fs = _fop.get("sha1", "")
+                if _fp and _fs and _fp not in _file_sha1_map:
+                    _file_sha1_map[_fp] = _fs
+
+        # 3. File creations (limit to 10, deduplicated, with SHA1 lookup)
+        _seen_files = set()
+        _file_count = 0
+        for ev in self.events:
+            if ev["event_type"] != "File Creation" or _file_count >= 10:
+                continue
+            d = ev["details"]
+            fpath = d.get("tgt.file.path", "") or d.get("file.path", "")
+            if not fpath or fpath in _seen_files:
+                continue
+            _seen_files.add(fpath)
+            _file_count += 1
+            # SHA1 from creation event, fallback to any file operation on same path
+            _sha1 = d.get("tgt.file.sha1", "") or _file_sha1_map.get(fpath, "")
+            downstream.append({
+                "type":      "file",
+                "detail":    fpath,
+                "sha1":      _sha1,
+                "timestamp": ev["timestamp_raw"],
+            })
+
+        # Sort downstream by timestamp and append to chain
+        downstream.sort(key=lambda x: x.get("timestamp", ""))
+        exec_chain.extend(downstream)
+
         # Extract target file for script hosts (wscript, cscript, mshta, etc.)
         target_file = ""
+        target_file_full_path = ""
         if root:
             _cmd = root.get("cmdline", "") or ""
             _pn = proc_name.lower()
@@ -5858,14 +5938,27 @@ class ReportGenerator:
                     # Try unquoted path
                     _tf_match = re.search(r'(?:^|\s)([^\s"<>|&]+' + _script_exts + r')\b', _cmd, re.IGNORECASE)
                 if _tf_match:
-                    target_file = _tf_match.group(1)
-                    # Show just the filename, not the full path
-                    target_file = Path(target_file).name if target_file else ""
+                    target_file_full_path = _tf_match.group(1)
+                    target_file = Path(target_file_full_path).name if target_file_full_path else ""
+
+        # Look up target file SHA1 from file operations (creation/modification/deletion)
+        target_file_sha1 = ""
+        if target_file_full_path:
+            # Direct lookup first
+            target_file_sha1 = _file_sha1_map.get(target_file_full_path, "")
+            # Fallback: match by filename suffix (case-insensitive)
+            if not target_file_sha1 and target_file:
+                _tf_lower = target_file.lower()
+                for _fp, _fs in _file_sha1_map.items():
+                    if _fp.lower().endswith("\\" + _tf_lower) or _fp.lower().endswith("/" + _tf_lower):
+                        target_file_sha1 = _fs
+                        break
 
         identification = {
             "process":      proc_name,
             "cmdline":      root.get("cmdline") if root else None,
             "target_file":  target_file,
+            "target_file_sha1": target_file_sha1 or None,
             "sha1":         root.get("sha1") if root else None,
             "signed":       root.get("signed") if root else None,
             "publisher":    root.get("publisher") if root else None,

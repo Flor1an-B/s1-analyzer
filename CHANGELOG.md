@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.3.0] - 2026-03-16
+
+### Added
+- **Enriched Execution Chain** — downstream actions now visible directly in the chain: child processes (with signing status), network connections (protocol, IP, port, domain, originating process), and file creations (with SHA1 hash). Chronologically sorted, capped at 10 per type with overflow indicator linking to detailed sections.
+- **Target file SHA1** — new `target_file_sha1` field in identification attempts to resolve the hash of the script/file being executed (e.g., a `.vbs` or `.ps1`) from File Creation/Modification/Deletion telemetry. When unavailable (pre-existing file), the HTML clearly indicates "not captured in telemetry".
+- **SHA1 label disambiguation** — when a target script is identified, the process SHA1 row is labeled with the process name (e.g., `SHA1 (WScript.exe)`) to avoid confusion with the target file hash.
+- **File SHA1 cross-lookup** — execution chain file entries are enriched via a path→SHA1 map built from all file operations (Creation, Modification, Deletion), not just Creation events.
+
+### Fixed
+- **Malicious Patterns truncation** — ScriptAnalyzer context window increased from `500+2000` to `1000+8000` chars around the match, revealing full decoded payloads instead of hex gibberish.
+- **CmdlineAnalyzer context** — widened from `20+40` to `40+120` chars around the match, and full command line (up to 5000 chars) now stored and rendered in scrollable code blocks.
+
+### Improved
+- **Execution Chain overflow** — child processes, network connections, and file creations each capped at 10 entries with "... +N more (see Process Tree section)" overflow message to keep the chain readable on large storylines (100+ children).
+
 ## [3.2.0] - 2026-03-10
 
 ### Added
