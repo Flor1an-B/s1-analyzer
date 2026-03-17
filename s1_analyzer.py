@@ -3924,8 +3924,8 @@ class IocExtractAnalyzer:
             # Clean URLs: iocextract can capture trailing garbage after the URL
             cleaned = []
             for u in raw_urls:
-                # Trim at first single-quote, comma, space, or closing bracket
-                u = re.split(r"[',\s\]\)\}>]", u)[0]
+                # Trim trailing noise (quotes, commas, spaces) then strip trailing brackets
+                u = re.split(r"[',\s]", u)[0].rstrip('])}>')
                 if u and len(u) > 8:
                     cleaned.append(u)
             self._iocs["urls"] = list(set(cleaned))
@@ -6495,7 +6495,7 @@ class ReportGenerator:
             if not matched:
                 _c2_domains[f"ip:{dst}"] = {
                     "domain": "", "urls": [],
-                    "ips": [dst], "observed": True,
+                    "ips": [dst], "ip": dst, "observed": True,
                     "process": conn.get("process_short", ""),
                     "port": conn.get("dst_port", ""),
                     "protocol": conn.get("protocol", ""),

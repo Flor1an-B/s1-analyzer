@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.3.1] - 2026-03-17
+
+### Fixed
+- **C2 Infrastructure — "Unknown" label** — IP-only entries (external connections without a resolved domain) now display the destination IP instead of "Unknown". Root cause: the entry dict used `"ips"` (list) while the renderer read `"ip"` (singular key, undefined); added `"ip": dst` to the entry.
+- **C2 Infrastructure — URL truncation** — URLs extracted via `iocextract` were split at the first `]`, `)`, `}`, or `>` character anywhere in the URL, truncating legitimate paths (e.g. `https://evil.com/path(v2)/payload.exe` → `https://evil.com/path(v2`). Fix: split only on `'`, `,`, and whitespace (true trailing noise), then `rstrip` bracket characters from the tail only.
+
 ## [3.3.0] - 2026-03-16
 
 ### Added
