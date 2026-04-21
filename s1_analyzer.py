@@ -73,7 +73,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # VERSION & METADATA
 # ---------------------------------------------------------------------------
-__version__  = "3.3.0"
+__version__  = "3.3.2"
 __author__   = "Florian Bertaux"
 __tool__     = "S1 Analyzer"
 
@@ -677,6 +677,117 @@ def _shannon_entropy(s: str) -> float:
         freq[c] = freq.get(c, 0) + 1
     n = len(s)
     return -sum((f / n) * _math.log2(f / n) for f in freq.values())
+
+
+# ---------------------------------------------------------------------------
+# URL EXTRACTION HELPERS
+# ---------------------------------------------------------------------------
+# Regex tuned for greedy-but-safe capture: accept anything a real URL can
+# contain per RFC 3986 (including commas, which are valid sub-delims in path
+# and query), stop only on whitespace, control chars, angle brackets,
+# quotes, backticks and pipes. Trailing unbalanced brackets and sentence
+# punctuation are stripped afterwards by _clean_url.
+_URL_RE = re.compile(r"""https?://[^\s<>"'`|\x00-\x1f]+""", re.IGNORECASE)
+
+# Defang patterns — applied after capture. Match anywhere (no ^ anchor)
+# because refanging runs on individual URL candidates, not full buffers.
+_DEFANG_PATTERNS = [
+    (re.compile(r'\bh[xX]{2}p(s?)://', re.IGNORECASE), r'http\1://'),
+    (re.compile(r'\[\.\]'),             '.'),
+    (re.compile(r'\(\.\)'),             '.'),
+    (re.compile(r'\{\.\}'),             '.'),
+    (re.compile(r'\[dot\]', re.IGNORECASE), '.'),
+    (re.compile(r'\(dot\)', re.IGNORECASE), '.'),
+    (re.compile(r'\[:\]'),              ':'),
+]
+_HXXP_FIND = re.compile(r'\bh[xX]{2}ps?://', re.IGNORECASE)
+
+
+def _refang(u: str) -> str:
+    """Revert common defang obfuscation (hxxp://, [.], [dot], etc.)."""
+    for pat, repl in _DEFANG_PATTERNS:
+        u = pat.sub(repl, u)
+    return u
+
+
+def _clean_url(u: str) -> str:
+    """Clean a URL captured from free-form text.
+
+    Strips trailing unbalanced brackets and sentence punctuation without
+    discarding commas/semicolons that are legitimately inside paths or
+    query strings. Returns '' if the result is not a plausible URL."""
+    if not u:
+        return ""
+    u = _refang(u.strip())
+    # Truncate at any interior character that shouldn't appear unencoded in a
+    # URL (mirrors _URL_RE's negated class). iocextract.extract_unencoded_urls
+    # may otherwise return URLs that span past surrounding quotes in shell-
+    # like contexts, e.g. @('https://host/p','0','C:\\...').
+    m = re.search(r'[\s"\'`<>\\|\x00-\x1f]', u)
+    if m:
+        u = u[:m.start()]
+    # Strip trailing sentence-level punctuation and unbalanced closers.
+    # Stop as soon as a closer is actually balanced inside the URL.
+    CLOSERS = {')': '(', ']': '[', '}': '{', '>': '<'}
+    QUOTES = set('"\'`')
+    SENTENCE = set('.,;!?')
+    while u:
+        c = u[-1]
+        if c in QUOTES:
+            u = u[:-1]
+            continue
+        if c in CLOSERS:
+            opener = CLOSERS[c]
+            if u.count(opener) < u.count(c):
+                u = u[:-1]
+                continue
+            break
+        if c in SENTENCE:
+            u = u[:-1]
+            continue
+        break
+    # Re-check scheme — a cleaning pass can never strip it but the input
+    # might have arrived with noise prefixed (rare, but defensive).
+    if not re.match(r'^https?://', u, re.I):
+        return ""
+    # Reject stubs without a host.
+    m = re.match(r'^https?://([^/?#]+)', u, re.I)
+    if not m or len(m.group(1)) < 3:
+        return ""
+    return u
+
+
+def _extract_urls_from_text(text: str) -> list:
+    """Regex-based URL extraction with defang + cleaning. Preserves order.
+
+    Used as a fallback when iocextract is not available, and as the primary
+    extractor for decoded payload content (where we want to avoid
+    iocextract's `extract_encoded_urls`, which produces truncated fragments
+    from base64/hex blobs)."""
+    if not text:
+        return []
+    out = []
+    seen = set()
+    # Also check defanged form — some payloads only contain hxxp:// URLs.
+    candidates = list(_URL_RE.findall(text))
+    for m in _HXXP_FIND.finditer(text):
+        tail = text[m.start():]
+        seg = re.split(r'[\s<>"\'`|\x00-\x1f]', tail, maxsplit=1)[0]
+        candidates.append(seg)
+    for raw in candidates:
+        u = _clean_url(raw)
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _normalize_url_key(u: str) -> str:
+    """Normalization key for case-insensitive dedup (scheme+host lower)."""
+    m = re.match(r'^(https?)://([^/?#]+)(.*)$', u, re.I)
+    if not m:
+        return u.lower()
+    return f"{m.group(1).lower()}://{m.group(2).lower()}{m.group(3)}"
 
 
 # ===========================================================================
@@ -2746,6 +2857,7 @@ class ScriptAnalyzer:
         import binascii
         decoded = []
         seen = set()
+        PATH_RE = re.compile(r"[A-Za-z]:\\[^\s'\"<>|*?]+")
         for script in self.scripts:
             content = script["content"]
             # 1. Hex-encoded payloads (common in PS obfuscation)
@@ -2759,17 +2871,18 @@ class ScriptAnalyzer:
                     raw = binascii.unhexlify(hex_str)
                     text = raw.decode("utf-8", errors="replace")
                     if text.count("\ufffd") / max(len(text), 1) < 0.3:
-                        # Extract key artifacts from decoded text
-                        urls = re.findall(r"https?://[^\s'\"<>]+", text)
-                        paths = re.findall(r"[A-Z]:\\[^\s'\"]+", text)
+                        urls  = _extract_urls_from_text(text)
+                        paths = list(dict.fromkeys(PATH_RE.findall(text)))
                         decoded.append({
-                            "encoding":  "hex",
-                            "length":    len(hex_str),
-                            "decoded":   text[:5000],
-                            "urls":      urls[:10],
-                            "paths":     paths[:10],
-                            "app":       script["app"],
-                            "timestamp": script["timestamp"],
+                            "encoding":    "hex",
+                            "length":      len(hex_str),
+                            "decoded":     text[:20000],
+                            "urls":        urls[:25],
+                            "urls_total":  len(urls),
+                            "paths":       paths[:25],
+                            "paths_total": len(paths),
+                            "app":         script["app"],
+                            "timestamp":   script["timestamp"],
                         })
                 except Exception:
                     pass
@@ -2786,15 +2899,18 @@ class ScriptAnalyzer:
                     # PowerShell -EncodedCommand uses UTF-16LE
                     text = raw.decode("utf-16-le", errors="replace")
                     if text.count("\ufffd") / max(len(text), 1) < 0.3:
-                        urls = re.findall(r"https?://[^\s'\"<>]+", text)
+                        urls  = _extract_urls_from_text(text)
+                        paths = list(dict.fromkeys(PATH_RE.findall(text)))
                         decoded.append({
-                            "encoding":  "base64",
-                            "length":    len(b64),
-                            "decoded":   text[:5000],
-                            "urls":      urls[:10],
-                            "paths":     [],
-                            "app":       script["app"],
-                            "timestamp": script["timestamp"],
+                            "encoding":    "base64",
+                            "length":      len(b64),
+                            "decoded":     text[:20000],
+                            "urls":        urls[:25],
+                            "urls_total":  len(urls),
+                            "paths":       paths[:25],
+                            "paths_total": len(paths),
+                            "app":         script["app"],
+                            "timestamp":   script["timestamp"],
                         })
                 except Exception:
                     pass
@@ -3895,59 +4011,138 @@ class YaraAnalyzer:
 
 class IocExtractAnalyzer:
     """
-    Extrait et déobfusque les IOCs cachés dans les scripts et cmdlines.
-    Nécessite : pip install iocextract
+    Extrait et déobfusque les IOCs cachés dans les scripts, cmdlines, DNS,
+    HTTP, file paths, indicator descriptions, etc. Fonctionne même sans
+    iocextract (fallback regex pour URLs et refang pour hxxp/[.]).
     """
+
+    # Source fields scanned for URL/IP/hash IOCs. Order matters for
+    # deterministic dedup-preserve ordering.
+    _SOURCE_FIELDS = (
+        "cmdScript.content",
+        "src.process.cmdline",
+        "tgt.process.cmdline",
+        "src.process.parent.cmdline",
+        "event.dns.request",
+        "event.dns.response",
+        "url.address",
+        "event.url.action",
+        "tgt.file.path",
+        "indicator.description",
+        "indicator.metadata",
+    )
+
+    # Display limits — raised from original 20/10 to reduce truncation.
+    MAX_URLS   = 100
+    MAX_IPS    = 100
+    MAX_HASHES = 200
+    MAX_EMAILS = 50
 
     def __init__(self, events: list):
         self.events = events
-        self._iocs: dict = {"urls": [], "ips": [], "hashes": [], "emails": []}
+        self._iocs: dict = {
+            "urls": [], "ips": [], "hashes": [], "emails": [],
+            "urls_total": 0, "ips_total": 0,
+            "hashes_total": 0, "emails_total": 0,
+        }
         self._extract()
 
-    def _extract(self):
-        if not HAS_IOC:
-            return
+    def _collect_texts(self) -> str:
         seen, texts = set(), []
         for ev in self.events:
             d = ev["details"]
-            for field in ("cmdScript.content","src.process.cmdline",
-                          "tgt.process.cmdline","event.dns.request"):
-                val = d.get(field,"") or ""
+            for field in self._SOURCE_FIELDS:
+                val = d.get(field, "") or ""
                 if val and val not in seen:
                     seen.add(val)
                     texts.append(val)
-        combined = "\n".join(texts)
+        return "\n".join(texts)
+
+    def _extract(self):
+        combined = self._collect_texts()
         if not combined.strip():
             return
-        try:
-            raw_urls = list(set(_iocextract.extract_urls(combined, refang=True)))[:20]
-            # Clean URLs: iocextract can capture trailing garbage after the URL
-            cleaned = []
-            for u in raw_urls:
-                # Trim trailing noise (quotes, commas, spaces) then strip trailing brackets
-                u = re.split(r"[',\s]", u)[0].rstrip('])}>')
-                if u and len(u) > 8:
-                    cleaned.append(u)
-            self._iocs["urls"] = list(set(cleaned))
-        except Exception:
-            pass
-        try:
-            self._iocs["ips"]    = list(set(_iocextract.extract_ips(combined, refang=True)))[:20]
-        except Exception:
-            pass
-        try:
-            self._iocs["hashes"] = list(set(_iocextract.extract_hashes(combined)))[:20]
-        except Exception:
-            pass
-        try:
-            self._iocs["emails"] = list(set(_iocextract.extract_emails(combined)))[:10]
-        except Exception:
-            pass
+
+        # ---- URLs --------------------------------------------------------
+        url_candidates = []
+        if HAS_IOC:
+            # Use only the unencoded extractor: extract_encoded_urls
+            # synthesizes fragments from base64/hex blobs that end up
+            # truncated (e.g. "http://www.micro"), which is exactly the
+            # bug we are fixing. The proper path for encoded URLs is
+            # ScriptAnalyzer.decode_payloads, which fully decodes the
+            # payload first and then extracts URLs from the plaintext.
+            try:
+                url_candidates.extend(_iocextract.extract_unencoded_urls(combined))
+            except Exception:
+                pass
+        # Regex fallback / augmentation (also catches hxxp:// refanged).
+        url_candidates.extend(_extract_urls_from_text(combined))
+
+        cleaned = []
+        seen_norm = set()
+        for raw in url_candidates:
+            u = _clean_url(raw)
+            if not u:
+                continue
+            key = _normalize_url_key(u)
+            if key in seen_norm:
+                continue
+            seen_norm.add(key)
+            cleaned.append(u)
+        self._iocs["urls_total"] = len(cleaned)
+        self._iocs["urls"] = cleaned[: self.MAX_URLS]
+
+        # ---- IPs ---------------------------------------------------------
+        ip_candidates = []
+        if HAS_IOC:
+            try:
+                ip_candidates.extend(_iocextract.extract_ips(combined, refang=True))
+            except Exception:
+                pass
+        else:
+            ip_candidates.extend(re.findall(
+                r'\b(?:\d{1,3}\.){3}\d{1,3}\b', combined))
+        ips_dedup = list(dict.fromkeys(ip_candidates))
+        self._iocs["ips_total"] = len(ips_dedup)
+        self._iocs["ips"] = ips_dedup[: self.MAX_IPS]
+
+        # ---- Hashes ------------------------------------------------------
+        hash_candidates = []
+        if HAS_IOC:
+            try:
+                hash_candidates.extend(_iocextract.extract_hashes(combined))
+            except Exception:
+                pass
+        else:
+            hash_candidates.extend(re.findall(
+                r'\b[a-fA-F0-9]{32,64}\b', combined))
+        hashes_dedup = list(dict.fromkeys(h.lower() for h in hash_candidates))
+        self._iocs["hashes_total"] = len(hashes_dedup)
+        self._iocs["hashes"] = hashes_dedup[: self.MAX_HASHES]
+
+        # ---- Emails ------------------------------------------------------
+        email_candidates = []
+        if HAS_IOC:
+            try:
+                email_candidates.extend(_iocextract.extract_emails(combined))
+            except Exception:
+                pass
+        else:
+            email_candidates.extend(re.findall(
+                r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+', combined))
+        emails_dedup = list(dict.fromkeys(email_candidates))
+        self._iocs["emails_total"] = len(emails_dedup)
+        self._iocs["emails"] = emails_dedup[: self.MAX_EMAILS]
 
     @property
-    def available(self) -> bool: return HAS_IOC
+    def available(self) -> bool:
+        # Available when either iocextract is installed OR we have events.
+        # The regex fallback still produces useful URL/IP/hash output.
+        return HAS_IOC or bool(self.events)
     def get_iocs(self)   -> dict: return self._iocs
-    def has_findings(self) -> bool: return any(self._iocs.values())
+    def has_findings(self) -> bool:
+        return any(self._iocs.get(k) for k in ("urls", "ips", "hashes", "emails"))
 
 
 # ===========================================================================
@@ -6359,11 +6554,29 @@ class ReportGenerator:
                             exe_name = self._extract_exe_name(cmdline)
                             display = d.get("src.process.parent.displayName", "") or ""
                         name = exe_name or cmdline or display or ""
-                    sha1_map[h] = {"sha1": h, "source": field, "name": Path(name.replace('"', '').strip()).name if name else ""}
+                    base = ""
+                    if name:
+                        raw = name.replace('"', '').strip()
+                        # Cross-platform basename: split on both separators so
+                        # Windows paths work when the analyzer runs on macOS/Linux.
+                        base = re.split(r'[\\/]', raw)[-1]
+                    sha1_map[h] = {"sha1": h, "source": field, "name": base}
         if sha1_map:
-            ioc_data.setdefault("hashes", [])
-            ioc_data["hashes"].extend(list(sha1_map.keys()))
+            existing = list(ioc_data.get("hashes", []))
+            ioc_data["hashes"] = list(dict.fromkeys(existing + list(sha1_map.keys())))
+            ioc_data["hashes_total"] = len(ioc_data["hashes"])
             ioc_data["file_hashes"] = list(sha1_map.values())
+
+        # Precompute VirusTotal URL identifiers (SHA-256 of the URL string,
+        # lower-hex). This matches the identifier format VT uses in its web
+        # GUI: https://www.virustotal.com/gui/url/<sha256>. The browser can't
+        # easily synthesize this at click time, so we ship it in the JSON.
+        if ioc_data.get("urls"):
+            import hashlib as _hashlib
+            ioc_data["url_vt_ids"] = {
+                u: _hashlib.sha256(u.encode("utf-8", errors="replace")).hexdigest()
+                for u in ioc_data["urls"]
+            }
 
         # ── VirusTotal ──
         vt_data = []
@@ -6452,23 +6665,30 @@ class ReportGenerator:
 
         # ── C2 Infrastructure (correlate network + IOC URLs + DNS) ──
         c2_infra = []
-        _ioc_urls = ioc_data.get("urls", []) if ioc_data else []
-        # Also extract URLs from decoded payloads
+        # Local working copy — never mutate ioc_data["urls"] (it is serialized
+        # to the JSON output as-is; appending decoded-payload URLs here would
+        # silently grow the IOC list and confuse downstream consumers).
+        _ioc_urls = list(ioc_data.get("urls", [])) if ioc_data else []
         for dp in decoded_payloads:
             for u in dp.get("urls", []):
                 if u not in _ioc_urls:
                     _ioc_urls.append(u)
         # Group by domain
         _c2_domains = {}
+        SAFE_DOMAIN_SUFFIXES = (
+            "microsoft.com", "windows.com", "windowsupdate.com", "office.com",
+            "live.com", "bing.com", "google.com", "gstatic.com", "github.com",
+            "githubusercontent.com", "apache.org", "mozilla.org",
+        )
         for url in _ioc_urls:
             m = re.match(r'https?://([^/:]+)', url)
             if not m:
                 continue
             domain = m.group(1).lower()
-            # Skip safe domains
-            if any(s in domain for s in ("microsoft.com", "windows.com", "windowsupdate.com",
-                                          "office.com", "live.com", "bing.com", "google.com",
-                                          "gstatic.com", "github.com", "githubusercontent.com")):
+            # Skip safe domains — match on suffix to avoid false matches
+            # like "notmicrosoft.com.evil.tld" accidentally whitelisting.
+            if any(domain == s or domain.endswith("." + s)
+                   for s in SAFE_DOMAIN_SUFFIXES):
                 continue
             if domain not in _c2_domains:
                 _c2_domains[domain] = {"domain": domain, "urls": [], "ips": [],

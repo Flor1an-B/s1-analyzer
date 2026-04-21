@@ -1,5 +1,28 @@
 # Changelog
 
+## [3.3.2] - 2026-04-21
+
+### Fixed
+- **IOC URL truncation (stubs)** — `IocExtractAnalyzer` previously called `iocextract.extract_urls`, which internally invokes `extract_encoded_urls` and synthesizes truncated URL fragments from base64/hex blobs (e.g. `http://www.micro`, `http://crl.microsoft.co`, `http://www.microsoft.com/pki/certs/MicRooCe`). Now uses `extract_unencoded_urls` only — encoded payloads are already handled by `ScriptAnalyzer.decode_payloads`, which decodes the full payload first and then extracts URLs from the plaintext.
+- **IOC URL over-extension past shell delimiters** — `iocextract.extract_unencoded_urls` returned URLs that continued past surrounding single quotes in PowerShell array literals like `@('https://host/p','0','C:\\...')`. `_clean_url` now truncates at the first interior character that cannot appear unencoded in an RFC 3986 URL (whitespace, `"`, `'`, `` ` ``, `<`, `>`, `\`, `|`, control chars).
+- **Aggressive URL trimming on commas** — the previous cleaner split URLs on any comma (`re.split(r"[',\s]", u)[0]`), destroying legitimate commas that are valid RFC 3986 sub-delims in paths and query strings. Replaced with a structured cleaner that strips only trailing unbalanced brackets and sentence punctuation (`.,;!?`), preserving commas embedded in the URL body.
+- **C2 Infrastructure mutated `ioc_data["urls"]`** — correlation logic appended decoded-payload URLs directly onto the shared IOC list, silently growing the JSON output's URL array on every run. Now works on a local clone (`list(ioc_data.get("urls", []))`).
+- **Windows-path basename on non-Windows hosts** — `Path(name).name` returned the full Windows path when the analyzer runs on macOS/Linux. Replaced with `re.split(r'[\\/]', raw)[-1]` for cross-platform behavior.
+- **VirusTotal "0/0 clean" on every row** — the VT results renderer fell through to the "clean" branch when the API returned a 404 or a transport error (empty `last_analysis_stats` → `total=0` → displayed as `0/0 clean`), masking real states. Now distinguishes: *No result* (empty dict), *Error: HTTP X* (transport error), *Unknown to VT (not analysed)* (`found: false`), *No analysis stats* (`found: true` but empty stats), and the real *N/M engines* or *0/M clean* for populated responses.
+- **VirusTotal deep-links broken for URLs and hashes** — IOC Extraction "VT↗" links used `/gui/search/<encoded>`, which for full URLs does not resolve to the URL detail page and for hashes loads a search view instead of the file page. Now uses `/gui/file/<hash>` for SHA-1/SHA-256 (direct file page) and `/gui/url/<sha256(url)>` for URLs (VT's canonical URL-detail identifier). The SHA-256 of each URL is precomputed server-side and shipped in the JSON as `ioc_extraction.url_vt_ids`.
+
+### Added
+- **Centralized URL helpers** — `_URL_RE`, `_refang`, `_clean_url`, `_extract_urls_from_text`, `_normalize_url_key`. Handles defanging (`hxxp://`, `[.]`, `(dot)`, `[:]`), order-preserving dedup via `dict.fromkeys`, and case-insensitive scheme+host normalization.
+- **Extended IOC source fields** — `IocExtractAnalyzer` now scans 11 fields instead of 4: `cmdScript.content`, `src/tgt/src.parent.process.cmdline`, `event.dns.request`, `event.dns.response`, `url.address`, `event.url.action`, `tgt.file.path`, `indicator.description`, `indicator.metadata`.
+- **Raised IOC caps + totals** — display limits increased to `urls=100`, `ips=100`, `hashes=200`, `emails=50`. JSON now exposes `urls_total`, `ips_total`, `hashes_total`, `emails_total` alongside the (capped) displayed lists, so downstream consumers can see when totals exceed what's shown.
+- **Regex fallback when `iocextract` missing** — IOC extraction now degrades gracefully: URL/IP/hash/email regexes kick in when the optional dependency isn't installed.
+- **Safe-domain suffix allowlist** — C2 correlation uses exact suffix matching (`domain == s or domain.endswith("." + s)`) to avoid e.g. `notmicrosoft.com.evil.tld` being accidentally whitelisted. Added `apache.org` and `mozilla.org` to the list.
+
+### Improved
+- **`ScriptAnalyzer.decode_payloads`** — URL slice raised from 10 to 25, decoded-text slice from 5000 to 20000 chars. Uses the centralized `_extract_urls_from_text` and exposes `urls_total`/`paths_total`. File-path regex moved to a class-level constant with broader character support.
+- **HTML IOC section (`renderIOC`)** — display caps raised to 50 per kind (URLs/IPs/hashes) and 25 for emails; shows `count / total` labels when the underlying total exceeds the displayed slice.
+- **HTML Decoded Payloads (`renderDecodedPayloads`)** — URL and file-path blocks now show `count / total` labels from `urls_total`/`paths_total`.
+
 ## [3.3.1] - 2026-03-17
 
 ### Fixed

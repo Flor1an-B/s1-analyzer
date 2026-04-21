@@ -1059,9 +1059,22 @@ function renderVirusTotal(){
     var r=v.result||{};
     var det=r.positives||r.malicious||0,total=r.total||0;
     var resHtml;
-    if(!r||Object.keys(r).length===0)resHtml='<span style="color:var(--dim)">Not found</span>';
-    else if(det>0)resHtml='<span style="color:var(--critical);font-weight:700">'+det+'/'+total+' engines</span>'+(r.threat_type?' <span class="badge b-critical">'+esc(r.threat_type)+'</span>':'');
-    else resHtml='<span style="color:var(--low)">0/'+total+' clean</span>';
+    // Ordered checks: empty result -> not queried; error -> surface it;
+    // found:false -> unknown to VT (never analyzed); total=0 with found ->
+    // analysed but no engine data yet (rare); det>0 -> malicious; else clean.
+    if(!r||Object.keys(r).length===0){
+      resHtml='<span style="color:var(--dim)">No result</span>';
+    } else if(r.error){
+      resHtml='<span style="color:var(--orange)">Error: '+esc(r.error)+'</span>';
+    } else if(r.found===false){
+      resHtml='<span style="color:var(--dim)">&#9679; Unknown to VT (not analysed)</span>';
+    } else if(total===0){
+      resHtml='<span style="color:var(--dim)">&#9679; No analysis stats</span>';
+    } else if(det>0){
+      resHtml='<span style="color:var(--critical);font-weight:700">'+det+'/'+total+' engines</span>'+(r.threat_type?' <span class="badge b-critical">'+esc(r.threat_type)+'</span>':'');
+    } else {
+      resHtml='<span style="color:var(--low)">0/'+total+' clean</span>';
+    }
     var identCol=v.sha1?copyable(v.sha1):'<span style="color:var(--dim);font-size:11px">URL</span>';
     var nameCol=v.sha1?esc(v.name||''):'<span style="font-family:var(--font-mono);font-size:11px;word-break:break-all" class="copyable" data-copy="'+esc(v.name||'')+'">'+esc(v.name||'')+'</span>';
     h+='<tr><td>'+esc(v.role||'')+'</td><td>'+nameCol+'</td><td style="font-family:var(--font-mono);font-size:11px">'+identCol+'</td><td>'+resHtml+'</td></tr>';
@@ -1205,27 +1218,47 @@ function renderAttackEnrichment(){
 function renderIOC(){
   var iocs=DATA.ioc_extraction||{};
   var kindLabels={urls:'URLs',ips:'IP Addresses',hashes:'Hashes (SHA1)',emails:'Emails',file_hashes:'File & Process Hashes'};
-  var total=0;
-  Object.values(iocs).forEach(function(v){if(Array.isArray(v))total+=v.length;});
-  if(total===0)return '<p style="color:var(--dim)">No IOCs extracted.</p>';
+  // Display caps per kind — URLs often run into the hundreds now that the
+  // extractor preserves full URLs with commas/query strings.
+  var DISPLAY_CAP={urls:50,ips:50,hashes:50,emails:25,file_hashes:50};
+  var totalCount=0;
+  Object.entries(iocs).forEach(function(e){if(Array.isArray(e[1]))totalCount+=e[1].length;});
+  if(totalCount===0)return '<p style="color:var(--dim)">No IOCs extracted.</p>';
   var h='<div style="margin-bottom:12px"><button onclick="(function(){var iocs=DATA.ioc_extraction||{};var lines=[];Object.entries(iocs).forEach(function(e){var k=e[0],items=e[1];if(!Array.isArray(items)||!items.length)return;lines.push(\'# \'+k);items.forEach(function(it){lines.push(typeof it===\'string\'?it:(it.sha1||it.value||it.ioc||JSON.stringify(it)));});lines.push(\'\');});navigator.clipboard.writeText(lines.join(\'\\n\'));showToast(\'All IOCs copied to clipboard\');})()" style="padding:6px 14px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600">&#128203; Copy All IOCs</button></div>';
   Object.entries(iocs).forEach(function(e){
     var kind=e[0],items=e[1];
     if(!Array.isArray(items)||items.length===0)return;
-    h+='<div style="margin-bottom:14px"><div class="chart-title">'+esc(kindLabels[kind]||kind)+' ('+items.length+')</div>';
-    items.slice(0,15).forEach(function(item){
+    var totalKey=kind+'_total';
+    var grandTotal=(typeof iocs[totalKey]==='number'&&iocs[totalKey]>items.length)?iocs[totalKey]:items.length;
+    var countLabel=items.length+(grandTotal>items.length?' / '+grandTotal+' total':'');
+    var cap=DISPLAY_CAP[kind]||50;
+    h+='<div style="margin-bottom:14px"><div class="chart-title">'+esc(kindLabels[kind]||kind)+' ('+countLabel+')</div>';
+    items.slice(0,cap).forEach(function(item){
       if(typeof item==='object'&&item.sha1){
-        h+='<div style="font-family:var(--font-mono);font-size:12px;padding:4px 8px;background:var(--red-l);border-radius:4px;margin-bottom:3px;display:flex;gap:8px;align-items:center;color:var(--red-d)" class="copyable" data-copy="'+esc(item.sha1)+'"><span style="flex:1;word-break:break-all">'+esc(item.sha1)+'</span><span style="color:var(--dim);font-size:11px;white-space:nowrap">'+esc(item.name||'')+'</span><a href="https://www.virustotal.com/gui/search/'+encodeURIComponent(item.sha1)+'" target="_blank" rel="noopener" style="color:var(--accent);font-size:10px;text-decoration:none;white-space:nowrap" title="Search on VirusTotal">VT&#8599;</a></div>';
+        h+='<div style="font-family:var(--font-mono);font-size:12px;padding:4px 8px;background:var(--red-l);border-radius:4px;margin-bottom:3px;display:flex;gap:8px;align-items:center;color:var(--red-d)" class="copyable" data-copy="'+esc(item.sha1)+'"><span style="flex:1;word-break:break-all">'+esc(item.sha1)+'</span><span style="color:var(--dim);font-size:11px;white-space:nowrap">'+esc(item.name||'')+'</span><a href="https://www.virustotal.com/gui/file/'+encodeURIComponent(item.sha1)+'" target="_blank" rel="noopener" style="color:var(--accent);font-size:10px;text-decoration:none;white-space:nowrap" title="Open on VirusTotal">VT&#8599;</a></div>';
       } else {
         var val=typeof item==='string'?item:(item.value||item.ioc||JSON.stringify(item));
         var tiLink='';
-        if(kind==='hashes'||kind==='file_hashes')tiLink='<a href="https://www.virustotal.com/gui/search/'+encodeURIComponent(val)+'" target="_blank" rel="noopener" style="color:var(--accent);font-size:10px;text-decoration:none;white-space:nowrap;margin-left:6px" title="Search on VirusTotal">VT&#8599;</a>';
-        else if(kind==='ips')tiLink='<a href="https://www.virustotal.com/gui/ip-address/'+encodeURIComponent(val)+'" target="_blank" rel="noopener" style="color:var(--accent);font-size:10px;text-decoration:none;white-space:nowrap;margin-left:6px" title="VT">VT&#8599;</a><a href="https://www.abuseipdb.com/check/'+encodeURIComponent(val)+'" target="_blank" rel="noopener" style="color:var(--orange);font-size:10px;text-decoration:none;white-space:nowrap;margin-left:4px" title="AbuseIPDB">AbuseIPDB&#8599;</a>';
-        else if(kind==='urls')tiLink='<a href="https://www.virustotal.com/gui/search/'+encodeURIComponent(val)+'" target="_blank" rel="noopener" style="color:var(--accent);font-size:10px;text-decoration:none;white-space:nowrap;margin-left:6px" title="VT">VT&#8599;</a><a href="https://urlhaus.abuse.ch/browse.php?search='+encodeURIComponent(val)+'" target="_blank" rel="noopener" style="color:var(--orange);font-size:10px;text-decoration:none;white-space:nowrap;margin-left:4px" title="URLhaus">URLhaus&#8599;</a>';
+        if(kind==='hashes'||kind==='file_hashes'){
+          // /gui/file/<hash> resolves for SHA-1 and SHA-256 and goes straight
+          // to the file detail page (unlike /gui/search, which loads a search
+          // results view).
+          tiLink='<a href="https://www.virustotal.com/gui/file/'+encodeURIComponent(val)+'" target="_blank" rel="noopener" style="color:var(--accent);font-size:10px;text-decoration:none;white-space:nowrap;margin-left:6px" title="Open on VirusTotal">VT&#8599;</a>';
+        } else if(kind==='ips'){
+          tiLink='<a href="https://www.virustotal.com/gui/ip-address/'+encodeURIComponent(val)+'" target="_blank" rel="noopener" style="color:var(--accent);font-size:10px;text-decoration:none;white-space:nowrap;margin-left:6px" title="VT">VT&#8599;</a><a href="https://www.abuseipdb.com/check/'+encodeURIComponent(val)+'" target="_blank" rel="noopener" style="color:var(--orange);font-size:10px;text-decoration:none;white-space:nowrap;margin-left:4px" title="AbuseIPDB">AbuseIPDB&#8599;</a>';
+        } else if(kind==='urls'){
+          // VT's URL detail page uses SHA-256(url) as the identifier. The
+          // Python side precomputes it into iocs.url_vt_ids so we can deep-
+          // link reliably; fall back to /gui/search only if the map is
+          // missing (older JSON payload).
+          var vtId=(iocs.url_vt_ids||{})[val];
+          var vtHref=vtId?('https://www.virustotal.com/gui/url/'+encodeURIComponent(vtId)):('https://www.virustotal.com/gui/search/'+encodeURIComponent(val));
+          tiLink='<a href="'+vtHref+'" target="_blank" rel="noopener" style="color:var(--accent);font-size:10px;text-decoration:none;white-space:nowrap;margin-left:6px" title="Open on VirusTotal">VT&#8599;</a><a href="https://urlhaus.abuse.ch/browse.php?search='+encodeURIComponent(val)+'" target="_blank" rel="noopener" style="color:var(--orange);font-size:10px;text-decoration:none;white-space:nowrap;margin-left:4px" title="URLhaus">URLhaus&#8599;</a>';
+        }
         h+='<div style="font-family:var(--font-mono);font-size:12px;padding:4px 8px;background:var(--red-l);border-radius:4px;margin-bottom:3px;word-break:break-all;color:var(--red-d);display:flex;align-items:center" class="copyable" data-copy="'+esc(val)+'"><span style="flex:1">'+esc(val)+'</span>'+tiLink+'</div>';
       }
     });
-    if(items.length>15)h+='<div style="color:var(--dim);font-size:11px">&hellip; and '+(items.length-15)+' more</div>';
+    if(items.length>cap)h+='<div style="color:var(--dim);font-size:11px">&hellip; and '+(items.length-cap)+' more</div>';
     h+='</div>';
   });
   return h;
@@ -1351,14 +1384,16 @@ function renderDecodedPayloads(){
     if(d.length)h+=' <span style="color:var(--dim);font-size:12px">('+d.length+' bytes)</span>';
     h+='</div><div class="ind-body">';
     if(d.urls&&d.urls.length){
-      h+='<div style="margin-bottom:8px"><span style="color:var(--orange);font-weight:600">URLs found:</span>';
+      var uTot=(typeof d.urls_total==='number'&&d.urls_total>d.urls.length)?(' ('+d.urls.length+' / '+d.urls_total+' total)'):(' ('+d.urls.length+')');
+      h+='<div style="margin-bottom:8px"><span style="color:var(--orange);font-weight:600">URLs found:'+uTot+'</span>';
       d.urls.forEach(function(u){
         h+='<div style="font-family:var(--font-mono);font-size:12px;margin:3px 0;padding:4px 8px;background:var(--red-l);border-radius:4px;word-break:break-all"><a href="#" onclick="return false" style="color:var(--red-d);text-decoration:none" class="copyable" data-copy="'+esc(u)+'">'+esc(u)+'</a></div>';
       });
       h+='</div>';
     }
     if(d.paths&&d.paths.length){
-      h+='<div style="margin-bottom:8px"><span style="color:var(--cyan);font-weight:600">File paths:</span>';
+      var pTot=(typeof d.paths_total==='number'&&d.paths_total>d.paths.length)?(' ('+d.paths.length+' / '+d.paths_total+' total)'):(' ('+d.paths.length+')');
+      h+='<div style="margin-bottom:8px"><span style="color:var(--cyan);font-weight:600">File paths:'+pTot+'</span>';
       d.paths.forEach(function(p){
         h+='<div style="font-family:var(--font-mono);font-size:12px;margin:2px 0" class="copyable" data-copy="'+esc(p)+'">'+esc(p)+'</div>';
       });
